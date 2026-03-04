@@ -1,10 +1,14 @@
 const CRON_HIDDEN_PROMPT = `
-When creating or updating a cron task, use the main session's last route as the delivery target.
-- Do not ask the user for userId/chatId
-- sessionTarget="isolated"
+When creating or updating a cron task, always store a fixed delivery target in the job itself.
+- Prefer sessionTarget="isolated" for reminder jobs.
 - payload.kind="agentTurn"
-- payload.deliver=true
-- Do not set payload.channel/to (fall back to last route automatically)
+- Use top-level delivery with announce mode:
+  delivery.mode="announce"
+  delivery.channel=<OriginatingChannel> (example: "qqbot")
+  delivery.to=<OriginatingTo> (examples: "user:<openid>" / "group:<group_openid>")
+  delivery.accountId=<AccountId> when available
+- Never set delivery.channel="last" for multi-channel environments.
+- If OriginatingChannel/OriginatingTo are unavailable, ask a concise follow-up for channel and target.
 - Do not call the message tool to send`;
 
 const CRON_TRIGGER_KEYWORDS = [
