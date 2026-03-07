@@ -17,6 +17,7 @@ import { join } from "node:path";
  * - groupAllowFrom: 群聊白名单会话 ID 列表
  * - historyLimit: 历史消息数量限制
  * - textChunkLimit: 文本分块大小限制
+ * - longTaskNoticeDelayMs: 长任务提醒延迟（毫秒，0 表示关闭）
  * - enableAICard: 是否启用 AI Card 流式响应
  * - maxFileSizeMB: 媒体文件大小限制 (MB)
  * - inboundMedia: 入站媒体归档与保留策略
@@ -51,6 +52,9 @@ export const DingtalkConfigSchema = z.object({
   
   /** 文本分块大小限制 (钉钉单条消息最大 4000 字符) */
   textChunkLimit: z.number().int().positive().optional().default(4000),
+
+  /** 长任务提醒延迟（毫秒），0 表示关闭 */
+  longTaskNoticeDelayMs: z.number().int().min(0).optional().default(30000),
   
   /** 是否启用 AI Card 流式响应 */
   enableAICard: z.boolean().optional().default(true),

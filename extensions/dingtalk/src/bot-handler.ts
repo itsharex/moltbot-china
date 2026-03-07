@@ -42,6 +42,101 @@ import {
   pruneInboundMediaDir,
 } from "@openclaw-china/shared";
 
+export const LONG_TASK_NOTICE_TEXT = "任务处理时间较长，请稍等，我还在继续处理。";
+export const DEFAULT_LONG_TASK_NOTICE_DELAY_MS = 30000;
+
+type LongTaskNoticeController = {
+  markReplyDelivered: () => void;
+  dispose: () => void;
+};
+
+export function startLongTaskNoticeTimer(params: {
+  delayMs: number;
+  logger: Pick<Logger, "warn">;
+  sendNotice: () => Promise<void>;
+}): LongTaskNoticeController {
+  const { delayMs, logger, sendNotice } = params;
+  let completed = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const clear = () => {
+    if (!timer) return;
+    clearTimeout(timer);
+    timer = null;
+  };
+
+  if (delayMs > 0) {
+    timer = setTimeout(() => {
+      if (completed) return;
+      completed = true;
+      timer = null;
+      void sendNotice().catch((err) => {
+        logger.warn(`send long-task notice failed: ${String(err)}`);
+      });
+    }, delayMs);
+    timer.unref?.();
+  } else {
+    completed = true;
+  }
+
+  return {
+    markReplyDelivered: () => {
+      if (completed) return;
+      completed = true;
+      clear();
+    },
+    dispose: () => {
+      completed = true;
+      clear();
+    },
+  };
+}
+
+const pendingLongTaskNotices = new Map<string, LongTaskNoticeController>();
+
+function armLongTaskNoticeForSession(params: {
+  sessionKey: string;
+  delayMs: number;
+  logger: Logger;
+  sendNotice: () => Promise<void>;
+}): LongTaskNoticeController {
+  const { sessionKey, delayMs, logger, sendNotice } = params;
+  pendingLongTaskNotices.get(sessionKey)?.dispose();
+
+  logger.debug?.(`[long-task] armed sessionKey=${sessionKey} delayMs=${delayMs}`);
+
+  const controller = startLongTaskNoticeTimer({
+    delayMs,
+    logger,
+    sendNotice: async () => {
+      pendingLongTaskNotices.delete(sessionKey);
+      logger.debug?.(`[long-task] firing sessionKey=${sessionKey}`);
+      await sendNotice();
+    },
+  });
+
+  const wrapped: LongTaskNoticeController = {
+    markReplyDelivered: () => {
+      const active = pendingLongTaskNotices.get(sessionKey);
+      if (active !== wrapped) return;
+      pendingLongTaskNotices.delete(sessionKey);
+      logger.debug?.(`[long-task] cleared sessionKey=${sessionKey} reason=reply-delivered`);
+      controller.markReplyDelivered();
+    },
+    dispose: () => {
+      const active = pendingLongTaskNotices.get(sessionKey);
+      if (active === wrapped) {
+        pendingLongTaskNotices.delete(sessionKey);
+        logger.debug?.(`[long-task] cleared sessionKey=${sessionKey} reason=disposed`);
+      }
+      controller.dispose();
+    },
+  };
+
+  pendingLongTaskNotices.set(sessionKey, wrapped);
+  return wrapped;
+}
+
 function buildGatewayUserContent(inboundCtx: InboundContext, logger: Logger): string {
   const base = inboundCtx.CommandBody ?? inboundCtx.Body ?? "";
   const { base: baseText, prompt } = splitCronHiddenPrompt(base);
@@ -1177,197 +1272,211 @@ export async function handleDingtalkMessage(params: {
       }
     }
 
-    // ===== 普通消息模�?=====
-    const textApi = coreChannel?.text as Record<string, unknown> | undefined;
-    
-    const textChunkLimitResolved =
-      (textApi?.resolveTextChunkLimit as ((opts: Record<string, unknown>) => number) | undefined)?.(
-        {
-          cfg,
-          channel: "dingtalk",
-          defaultLimit: dingtalkCfgResolved.textChunkLimit ?? 4000,
-        }
-      ) ?? (dingtalkCfgResolved.textChunkLimit ?? 4000);
-    const chunkMode = (textApi?.resolveChunkMode as ((cfg: unknown, channel: string) => unknown) | undefined)?.(cfg, "dingtalk");
-    const tableMode = "bullets";
-
-    const deliver = async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }, info?: { kind?: string }) => {
-      logger.debug(
-        `[reply] meta=${JSON.stringify({
-          ...resolvedTargetMeta,
-          kind: info?.kind ?? "unknown",
-          hasText: typeof payload.text === "string",
-          mediaCount: Array.isArray(payload.mediaUrls)
-            ? payload.mediaUrls.length
-            : payload.mediaUrl
-              ? 1
-              : 0,
-        })}`
-      );
-      const targetId = isGroup ? ctx.conversationId : ctx.senderId;
-      const chatType = isGroup ? "group" : "direct";
-      let sent = false;
-
-      const sendMediaWithFallback = async (mediaUrl: string): Promise<void> => {
-        try {
-          await sendMediaDingtalk({
-            cfg: dingtalkCfgResolved,
-            to: targetId,
-            mediaUrl,
-            chatType,
-          });
-          sent = true;
-        } catch (err) {
-          logger.error(
-            `[reply] sendMediaDingtalk failed (target=${JSON.stringify(resolvedTargetMeta)}): ${String(err)}`
-          );
-          const fallbackText = `📎 ${mediaUrl}`;
-          await sendMessageDingtalk({
-            cfg: dingtalkCfgResolved,
-            to: targetId,
-            text: fallbackText,
-            chatType,
-          });
-          sent = true;
-        }
-      };
-
-      const payloadMediaUrls = payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []);
-      const rawText = payload.text ?? "";
-      const { mediaUrls: mediaFromLines } = extractMediaLinesFromText({
-        text: rawText,
-        logger,
-      });
-      const { mediaUrls: localMediaFromText } = extractLocalMediaFromText({
-        text: rawText,
-        logger,
-      });
-
-      const mediaQueue: string[] = [];
-      const seenMedia = new Set<string>();
-      const addMedia = (value?: string) => {
-        const trimmed = value?.trim();
-        if (!trimmed) return;
-        if (seenMedia.has(trimmed)) return;
-        seenMedia.add(trimmed);
-        mediaQueue.push(trimmed);
-      };
-
-      for (const url of payloadMediaUrls) addMedia(url);
-      for (const url of mediaFromLines) addMedia(url);
-      for (const url of localMediaFromText) addMedia(url);
-
-      const converted = (textApi?.convertMarkdownTables as ((text: string, mode: string) => string) | undefined)?.(
-        rawText,
-        tableMode
-      ) ?? rawText;
-
-      const hasText = converted.trim().length > 0;
-      if (hasText) {
-        const chunks =
-          textApi?.chunkTextWithMode && typeof textChunkLimitResolved === "number" && textChunkLimitResolved > 0
-            ? (textApi.chunkTextWithMode as (text: string, limit: number, mode: unknown) => string[])(converted, textChunkLimitResolved, chunkMode)
-            : [converted];
-
-        for (const chunk of chunks) {
-          await sendMessageDingtalk({
-            cfg: dingtalkCfgResolved,
-            to: targetId,
-            text: chunk,
-            chatType,
-          });
-          sent = true;
-        }
-      }
-
-      for (const mediaUrl of mediaQueue) {
-        await sendMediaWithFallback(mediaUrl);
-      }
-
-      if (!hasText && mediaQueue.length === 0) {
-        return false;
-      }
-      return sent;
-    };
-
-    const humanDelay = (replyApi?.resolveHumanDelayConfig as ((cfg: unknown, agentId?: string) => unknown) | undefined)?.(
-      cfg,
-      (route as Record<string, unknown>)?.agentId as string | undefined
-    );
-
-    const createDispatcherWithTyping = replyApi?.createReplyDispatcherWithTyping as
-      | ((opts: Record<string, unknown>) => Record<string, unknown>)
-      | undefined;
-    const createDispatcher = replyApi?.createReplyDispatcher as
-      | ((opts: Record<string, unknown>) => Record<string, unknown>)
-      | undefined;
-
-    const dispatchReplyWithBufferedBlockDispatcher = replyApi?.dispatchReplyWithBufferedBlockDispatcher as
-      | ((opts: Record<string, unknown>) => Promise<Record<string, unknown>>)
-      | undefined;
-
-    if (dispatchReplyWithBufferedBlockDispatcher) {
-      logger.debug(
-        `[dispatch] buffered=${JSON.stringify({
-          sessionKey: (route as Record<string, unknown>)?.sessionKey,
-          ...resolvedTargetMeta,
-        })}`
-      );
-      const deliveryState = { delivered: false, skippedNonSilent: 0 };
-      const result = await dispatchReplyWithBufferedBlockDispatcher({
-        ctx: finalCtx,
-        cfg,
-        dispatcherOptions: {
-          deliver: async (payload: unknown, info?: { kind?: string }) => {
-            const didSend = await deliver(
-              payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] },
-              info
-            );
-            if (didSend) {
-              deliveryState.delivered = true;
-            }
-          },
-          humanDelay,
-          onSkip: (_payload: unknown, info: { kind: string; reason: string }) => {
-            if (info.reason !== "silent") {
-              deliveryState.skippedNonSilent += 1;
-            }
-          },
-          onError: (err: unknown, info: { kind: string }) => {
-            logger.error(`${info.kind} reply failed: ${String(err)}`);
-          },
-        },
-      });
-
-      if (!deliveryState.delivered && deliveryState.skippedNonSilent > 0) {
+    // ===== 普通消息模式 =====
+    const targetId = isGroup ? ctx.conversationId : ctx.senderId;
+    const chatType = isGroup ? "group" : "direct";
+    const routeSessionKeyRaw = (route as { sessionKey?: unknown }).sessionKey;
+    const routeSessionKey =
+      typeof routeSessionKeyRaw === "string" && routeSessionKeyRaw.trim()
+        ? routeSessionKeyRaw
+        : `dingtalk:${chatType}:${targetId}`;
+    const longTaskNotice = armLongTaskNoticeForSession({
+      sessionKey: routeSessionKey,
+      delayMs: dingtalkCfgResolved.longTaskNoticeDelayMs ?? DEFAULT_LONG_TASK_NOTICE_DELAY_MS,
+      logger,
+      sendNotice: async () => {
         await sendMessageDingtalk({
           cfg: dingtalkCfgResolved,
-          to: isGroup ? ctx.conversationId : ctx.senderId,
-          text: "No response generated. Please try again.",
-          chatType: isGroup ? "group" : "direct",
+          to: targetId,
+          text: LONG_TASK_NOTICE_TEXT,
+          chatType,
         });
+      },
+    });
+
+    try {
+      const textApi = coreChannel?.text as Record<string, unknown> | undefined;
+      
+      const textChunkLimitResolved =
+        (textApi?.resolveTextChunkLimit as ((opts: Record<string, unknown>) => number) | undefined)?.(
+          {
+            cfg,
+            channel: "dingtalk",
+            defaultLimit: dingtalkCfgResolved.textChunkLimit ?? 4000,
+          }
+        ) ?? (dingtalkCfgResolved.textChunkLimit ?? 4000);
+      const chunkMode = (textApi?.resolveChunkMode as ((cfg: unknown, channel: string) => unknown) | undefined)?.(cfg, "dingtalk");
+      const tableMode = "bullets";
+
+      const deliver = async (payload: { text?: string; mediaUrl?: string; mediaUrls?: string[] }, info?: { kind?: string }) => {
+        logger.debug(
+          `[reply] meta=${JSON.stringify({
+            ...resolvedTargetMeta,
+            kind: info?.kind ?? "unknown",
+            hasText: typeof payload.text === "string",
+            mediaCount: Array.isArray(payload.mediaUrls)
+              ? payload.mediaUrls.length
+              : payload.mediaUrl
+                ? 1
+                : 0,
+          })}`
+        );
+        let sent = false;
+
+        const sendMediaWithFallback = async (mediaUrl: string): Promise<void> => {
+          try {
+            await sendMediaDingtalk({
+              cfg: dingtalkCfgResolved,
+              to: targetId,
+              mediaUrl,
+              chatType,
+            });
+            sent = true;
+            longTaskNotice.markReplyDelivered();
+          } catch (err) {
+            logger.error(
+              `[reply] sendMediaDingtalk failed (target=${JSON.stringify(resolvedTargetMeta)}): ${String(err)}`
+            );
+            const fallbackText = `📎 ${mediaUrl}`;
+            await sendMessageDingtalk({
+              cfg: dingtalkCfgResolved,
+              to: targetId,
+              text: fallbackText,
+              chatType,
+            });
+            sent = true;
+            longTaskNotice.markReplyDelivered();
+          }
+        };
+
+        const payloadMediaUrls = payload.mediaUrls ?? (payload.mediaUrl ? [payload.mediaUrl] : []);
+        const rawText = payload.text ?? "";
+        const { mediaUrls: mediaFromLines } = extractMediaLinesFromText({
+          text: rawText,
+          logger,
+        });
+        const { mediaUrls: localMediaFromText } = extractLocalMediaFromText({
+          text: rawText,
+          logger,
+        });
+
+        const mediaQueue: string[] = [];
+        const seenMedia = new Set<string>();
+        const addMedia = (value?: string) => {
+          const trimmed = value?.trim();
+          if (!trimmed) return;
+          if (seenMedia.has(trimmed)) return;
+          seenMedia.add(trimmed);
+          mediaQueue.push(trimmed);
+        };
+
+        for (const url of payloadMediaUrls) addMedia(url);
+        for (const url of mediaFromLines) addMedia(url);
+        for (const url of localMediaFromText) addMedia(url);
+
+        const converted = (textApi?.convertMarkdownTables as ((text: string, mode: string) => string) | undefined)?.(
+          rawText,
+          tableMode
+        ) ?? rawText;
+
+        const hasText = converted.trim().length > 0;
+        if (hasText) {
+          const chunks =
+            textApi?.chunkTextWithMode && typeof textChunkLimitResolved === "number" && textChunkLimitResolved > 0
+              ? (textApi.chunkTextWithMode as (text: string, limit: number, mode: unknown) => string[])(converted, textChunkLimitResolved, chunkMode)
+              : [converted];
+
+          for (const chunk of chunks) {
+            await sendMessageDingtalk({
+              cfg: dingtalkCfgResolved,
+              to: targetId,
+              text: chunk,
+              chatType,
+            });
+            sent = true;
+            longTaskNotice.markReplyDelivered();
+          }
+        }
+
+        for (const mediaUrl of mediaQueue) {
+          await sendMediaWithFallback(mediaUrl);
+        }
+
+        if (!hasText && mediaQueue.length === 0) {
+          return false;
+        }
+        return sent;
+      };
+
+      const humanDelay = (replyApi?.resolveHumanDelayConfig as ((cfg: unknown, agentId?: string) => unknown) | undefined)?.(
+        cfg,
+        (route as Record<string, unknown>)?.agentId as string | undefined
+      );
+
+      const createDispatcherWithTyping = replyApi?.createReplyDispatcherWithTyping as
+        | ((opts: Record<string, unknown>) => Record<string, unknown>)
+        | undefined;
+      const createDispatcher = replyApi?.createReplyDispatcher as
+        | ((opts: Record<string, unknown>) => Record<string, unknown>)
+        | undefined;
+
+      const dispatchReplyWithDispatcher = replyApi?.dispatchReplyWithDispatcher as
+        | ((opts: Record<string, unknown>) => Promise<Record<string, unknown>>)
+        | undefined;
+
+      if (dispatchReplyWithDispatcher) {
+        logger.debug(
+          `[dispatch] direct=${JSON.stringify({
+            sessionKey: (route as Record<string, unknown>)?.sessionKey,
+            ...resolvedTargetMeta,
+          })}`
+        );
+        const deliveryState = { delivered: false, skippedNonSilent: 0 };
+        const result = await dispatchReplyWithDispatcher({
+          ctx: finalCtx,
+          cfg,
+          dispatcherOptions: {
+            deliver: async (payload: unknown, info?: { kind?: string }) => {
+              const didSend = await deliver(
+                payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] },
+                info
+              );
+              if (didSend) {
+                deliveryState.delivered = true;
+              }
+            },
+            humanDelay,
+            onSkip: (_payload: unknown, info: { kind: string; reason: string }) => {
+              if (info.reason !== "silent") {
+                deliveryState.skippedNonSilent += 1;
+              }
+            },
+            onError: (err: unknown, info: { kind: string }) => {
+              logger.error(`${info.kind} reply failed: ${String(err)}`);
+            },
+          },
+        });
+
+        if (!deliveryState.delivered && deliveryState.skippedNonSilent > 0) {
+          await sendMessageDingtalk({
+            cfg: dingtalkCfgResolved,
+            to: targetId,
+            text: "No response generated. Please try again.",
+            chatType,
+          });
+          longTaskNotice.markReplyDelivered();
+        }
+
+        const counts = (result as Record<string, unknown>)?.counts as Record<string, unknown> | undefined;
+        const queuedFinal = (result as Record<string, unknown>)?.queuedFinal as unknown;
+        logger.debug(
+          `dispatch complete (queuedFinal=${typeof queuedFinal === "boolean" ? queuedFinal : "unknown"}, replies=${counts?.final ?? 0})`
+        );
+        return;
       }
 
-      const counts = (result as Record<string, unknown>)?.counts as Record<string, unknown> | undefined;
-      const queuedFinal = (result as Record<string, unknown>)?.queuedFinal as unknown;
-      logger.debug(
-        `dispatch complete (queuedFinal=${typeof queuedFinal === "boolean" ? queuedFinal : "unknown"}, replies=${counts?.final ?? 0})`
-      );
-      return;
-    }
-
-    const dispatcherResult = createDispatcherWithTyping
-      ? createDispatcherWithTyping({
-          deliver: async (payload: unknown, info?: { kind?: string }) => {
-            await deliver(payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] }, info);
-          },
-          humanDelay,
-          onError: (err: unknown, info: { kind: string }) => {
-            logger.error(`${info.kind} reply failed: ${String(err)}`);
-          },
-        })
-      : {
-          dispatcher: createDispatcher?.({
+      const dispatcherResult = createDispatcherWithTyping
+        ? createDispatcherWithTyping({
             deliver: async (payload: unknown, info?: { kind?: string }) => {
               await deliver(payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] }, info);
             },
@@ -1375,49 +1484,62 @@ export async function handleDingtalkMessage(params: {
             onError: (err: unknown, info: { kind: string }) => {
               logger.error(`${info.kind} reply failed: ${String(err)}`);
             },
-          }),
-          replyOptions: {},
-          markDispatchIdle: () => undefined,
-        };
+          })
+        : {
+            dispatcher: createDispatcher?.({
+              deliver: async (payload: unknown, info?: { kind?: string }) => {
+                await deliver(payload as { text?: string; mediaUrl?: string; mediaUrls?: string[] }, info);
+              },
+              humanDelay,
+              onError: (err: unknown, info: { kind: string }) => {
+                logger.error(`${info.kind} reply failed: ${String(err)}`);
+              },
+            }),
+            replyOptions: {},
+            markDispatchIdle: () => undefined,
+          };
 
-    const dispatcher = (dispatcherResult as Record<string, unknown>)?.dispatcher as Record<string, unknown> | undefined;
-    if (!dispatcher) {
-      logger.debug("dispatcher not available, skipping dispatch");
-      return;
+      const dispatcher = (dispatcherResult as Record<string, unknown>)?.dispatcher as Record<string, unknown> | undefined;
+      if (!dispatcher) {
+        logger.debug("dispatcher not available, skipping dispatch");
+        return;
+      }
+
+      logger.debug(
+        `[dispatch] legacy=${JSON.stringify({
+          sessionKey: (route as Record<string, unknown>)?.sessionKey,
+          ...resolvedTargetMeta,
+        })}`
+      );
+
+      const dispatchReplyFromConfig = replyApi?.dispatchReplyFromConfig as
+        | ((opts: Record<string, unknown>) => Promise<Record<string, unknown>>)
+        | undefined;
+
+      if (!dispatchReplyFromConfig) {
+        logger.debug("dispatchReplyFromConfig not available");
+        return;
+      }
+
+      const result = await dispatchReplyFromConfig({
+        ctx: finalCtx,
+        cfg,
+        dispatcher,
+        replyOptions: (dispatcherResult as Record<string, unknown>)?.replyOptions ?? {},
+      });
+
+      const markDispatchIdle = (dispatcherResult as Record<string, unknown>)?.markDispatchIdle as (() => void) | undefined;
+      markDispatchIdle?.();
+
+      const counts = (result as Record<string, unknown>)?.counts as Record<string, unknown> | undefined;
+      const queuedFinal = (result as Record<string, unknown>)?.queuedFinal as unknown;
+      logger.debug(
+        `dispatch complete (queuedFinal=${typeof queuedFinal === "boolean" ? queuedFinal : "unknown"}, replies=${counts?.final ?? 0})`
+      );
+    } catch (err) {
+      longTaskNotice.dispose();
+      throw err;
     }
-
-    logger.debug(
-      `[dispatch] standard=${JSON.stringify({
-        sessionKey: (route as Record<string, unknown>)?.sessionKey,
-        ...resolvedTargetMeta,
-      })}`
-    );
-
-    // 分发消息
-    const dispatchReplyFromConfig = replyApi?.dispatchReplyFromConfig as
-      | ((opts: Record<string, unknown>) => Promise<Record<string, unknown>>)
-      | undefined;
-
-    if (!dispatchReplyFromConfig) {
-      logger.debug("dispatchReplyFromConfig not available");
-      return;
-    }
-
-    const result = await dispatchReplyFromConfig({
-      ctx: finalCtx,
-      cfg,
-      dispatcher,
-      replyOptions: (dispatcherResult as Record<string, unknown>)?.replyOptions ?? {},
-    });
-
-    const markDispatchIdle = (dispatcherResult as Record<string, unknown>)?.markDispatchIdle as (() => void) | undefined;
-    markDispatchIdle?.();
-
-    const counts = (result as Record<string, unknown>)?.counts as Record<string, unknown> | undefined;
-    const queuedFinal = (result as Record<string, unknown>)?.queuedFinal as unknown;
-    logger.debug(
-      `dispatch complete (queuedFinal=${typeof queuedFinal === "boolean" ? queuedFinal : "unknown"}, replies=${counts?.final ?? 0})`
-    );
   } catch (err) {
     logger.error(
       `failed to dispatch message (target=${JSON.stringify(inboundTargetMeta)}): ${String(err)}`

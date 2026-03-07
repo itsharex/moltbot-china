@@ -123,6 +123,7 @@ export const dingtalkPlugin = {
         groupAllowFrom: { type: "array", items: { type: "string" } },
         historyLimit: { type: "integer", minimum: 0 },
         textChunkLimit: { type: "integer", minimum: 1 },
+        longTaskNoticeDelayMs: { type: "integer", minimum: 0 },
         enableAICard: { type: "boolean" },
         gatewayToken: { type: "string" },
         gatewayPassword: { type: "string" },

@@ -105,6 +105,7 @@ openclaw config set channels.dingtalk '{
   "enabled": true,
   "clientId": "dingxxxxxx",
   "clientSecret": "your-app-secret",
+  "longTaskNoticeDelayMs": 30000,
   "enableAICard": true,
   "maxFileSizeMB": 100,
   "inboundMedia": {
@@ -122,6 +123,7 @@ openclaw config set channels.dingtalk '{
 | clientSecret | string | - | 钉钉应用 AppSecret |
 | dmPolicy | string | "open" | 单聊策略: open/pairing/allowlist |
 | groupPolicy | string | "open" | 群聊策略: open/allowlist/disabled |
+| longTaskNoticeDelayMs | number | 30000 | 非流式普通消息模式下，首条正式回复超过该时长仍未发送时，自动补发“任务处理时间较长，请稍等，我还在继续处理。”；设为 `0` 可关闭 |
 | enableAICard | boolean | true | 是否启用 AI Card 流式响应 |
 | maxFileSizeMB | number | 100 | 媒体文件大小限制 (MB) |
 | inboundMedia.dir | string | `~/.openclaw/media/dingtalk/inbound` | 入站媒体归档根目录 |

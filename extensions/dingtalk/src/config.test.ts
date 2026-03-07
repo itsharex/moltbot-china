@@ -33,6 +33,7 @@ describe("Feature: dingtalk-integration, Property 1: 配置 Schema 验证", () =
       groupAllowFrom: fc.option(fc.array(fc.string()), { nil: undefined }),
       historyLimit: fc.option(fc.integer({ min: 0, max: 100 }), { nil: undefined }),
       textChunkLimit: fc.option(fc.integer({ min: 1, max: 10000 }), { nil: undefined }),
+      longTaskNoticeDelayMs: fc.option(fc.integer({ min: 0, max: 300000 }), { nil: undefined }),
     });
 
     fc.assert(
@@ -50,6 +51,7 @@ describe("Feature: dingtalk-integration, Property 1: 配置 Schema 验证", () =
           expect(typeof result.data.requireMention).toBe("boolean");
           expect(typeof result.data.historyLimit).toBe("number");
           expect(typeof result.data.textChunkLimit).toBe("number");
+          expect(typeof result.data.longTaskNoticeDelayMs).toBe("number");
           
           // Verify default values when not provided
           if (config.enabled === undefined) {
@@ -69,6 +71,9 @@ describe("Feature: dingtalk-integration, Property 1: 配置 Schema 验证", () =
           }
           if (config.textChunkLimit === undefined) {
             expect(result.data.textChunkLimit).toBe(4000);
+          }
+          if (config.longTaskNoticeDelayMs === undefined) {
+            expect(result.data.longTaskNoticeDelayMs).toBe(30000);
           }
         }
       }),
@@ -200,6 +205,23 @@ describe("Feature: dingtalk-integration, Property 1: 配置 Schema 验证", () =
 
     fc.assert(
       fc.property(nonPositiveChunkArb, (config) => {
+        const result = DingtalkConfigSchema.safeParse(config);
+        expect(result.success).toBe(false);
+      }),
+      { numRuns: 50 }
+    );
+  });
+
+  /**
+   * Property: longTaskNoticeDelayMs should reject negative values
+   */
+  it("should reject negative longTaskNoticeDelayMs values", () => {
+    const negativeDelayArb = fc.record({
+      longTaskNoticeDelayMs: fc.integer({ max: -1 }),
+    });
+
+    fc.assert(
+      fc.property(negativeDelayArb, (config) => {
         const result = DingtalkConfigSchema.safeParse(config);
         expect(result.success).toBe(false);
       }),
