@@ -264,6 +264,8 @@ export async function handleWechatMpWebhookRequest(
 
   if (req.method === "GET") {
     const echostr = query.get("echostr") ?? "";
+    const encryptType = query.get("encrypt_type") ?? "";
+    const hasEncryptedQuery = Boolean(query.get("msg_signature") || encryptType === "aes");
     const target = findTargetByGetSignature({
       targets,
       timestamp,
@@ -277,7 +279,7 @@ export async function handleWechatMpWebhookRequest(
       return true;
     }
 
-    if (target.account.config.messageMode === "plain") {
+    if (!hasEncryptedQuery) {
       res.statusCode = 200;
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.end(echostr);

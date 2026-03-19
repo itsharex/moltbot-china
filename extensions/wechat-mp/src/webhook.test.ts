@@ -153,6 +153,29 @@ describe("wechat-mp webhook", () => {
     }
   });
 
+  it("handles GET webhook verification in safe mode without msg_signature by returning plain echostr", async () => {
+    const unregister = registerWechatMpWebhookTarget(createTarget({ path: "/wechat-mp-get-safe" }));
+
+    try {
+      const timestamp = "1710000000";
+      const nonce = "nonce-verify-safe-no-msgsig";
+      const echostr = "783367174650329039";
+      const signature = computeSignature({ token, timestamp, nonce });
+      const req = createMockRequest({
+        method: "GET",
+        url: `/wechat-mp-get-safe?signature=${encodeURIComponent(signature)}&timestamp=${encodeURIComponent(timestamp)}&nonce=${encodeURIComponent(nonce)}&echostr=${encodeURIComponent(echostr)}`,
+      });
+      const res = createMockResponse();
+
+      const handled = await handleWechatMpWebhookRequest(req, res);
+      expect(handled).toBe(true);
+      expect(res._getStatusCode()).toBe(200);
+      expect(res._getData()).toBe(echostr);
+    } finally {
+      unregister();
+    }
+  });
+
   it("handles POST encrypted text message and ACKs success", async () => {
     const unregister = registerWechatMpWebhookTarget(createTarget());
 
