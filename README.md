@@ -1,11 +1,12 @@
-# 🦞 OpenClaw China
+# 🦞 OpenClaw China — China IM Channels
 
-> OpenClaw 的中国 IM 渠道扩展集合
+<p align="center">
+  <strong>面向中国 IM 平台的 OpenClaw 扩展插件集合</strong>
+</p>
 
-<p>
-  <img alt="downloads" src="./.github/badges/npm-downloads-18m.svg" />
-  <a href="./package.json">
-    <img alt="license MIT" src="https://img.shields.io/badge/license-MIT-1f6feb?logo=open-source-initiative&logoColor=white" />
+<p align="center">
+  <img alt="downloads" src="https://raw.githubusercontent.com/BytePioneer-AI/openclaw-china-badges/main/.github/badges/npm-downloads-18m.svg" />
+  <a href="./package.json">    <img alt="license MIT" src="https://img.shields.io/badge/license-MIT-1f6feb?logo=open-source-initiative&logoColor=white" />
   </a>
  <a href="https://linux.do" alt="LINUX DO"><img src="https://shorturl.at/ggSqS" /></a>
 </p>
